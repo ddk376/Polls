@@ -16,8 +16,16 @@ class Response < ActiveRecord::Base
     through: :answer_choice,
     source: :question
 
+  has_one :poll,
+    through: :question,
+    source: :poll
+
+  has_many :responses,
+    through: :question,
+    source: :responses
+
   def does_not_respond_to_own_poll
-    if question.poll.author_id  == respondent_id
+    if poll.author_id  == respondent_id
       errors[:author] << "Cannot respond to own poll."
     end
   end
@@ -25,12 +33,12 @@ class Response < ActiveRecord::Base
   private
 
   def respondent_has_not_already_answered_question
-    if sibling_responses.exists?(['responses.respondent_id != ?', id])
+    if sibling_responses.exists?(['responses.respondent_id = ?', respondent_id])
       errors[:respondent] << "Has already answered the question"
     end
   end
 
   def sibling_responses
-    question.responses.where('responses.id != ? AND ? IS NOT NULL', id, id)
+    responses.where('responses.id != ? AND ? IS NOT NULL', id, id)
   end
 end
