@@ -1,4 +1,6 @@
 class AnswerChoice < ActiveRecord::Base
+  validates :choice, presence: true
+
   belongs_to :question,
     class_name: 'Question',
     foreign_key: :question_id,
