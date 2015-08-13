@@ -12,6 +12,32 @@ class User < ActiveRecord::Base
     foreign_key: :respondent_id,
     primary_key: :id
 
+  def completed_polls_activerecord
+    completed = Poll
+      .joins(:questions)
+      .joins("INNER JOIN answer_choices ON answer_choices.question_id = questions.id")
+      .joins("LEFT OUTER JOIN ( #{Response.where("respondent_id = ?", self.id).to_sql} ) AS users_responses
+              ON users_responses.answer_choice_id = answer_choices.id")
+      .group("polls.id")
+      .having("COUNT(questions.id) = COUNT(users_responses.id)")
+      .select("polls.*, COUNT(DISTINCT(questions.id)) AS questions_count")
+
+    completed.map { |c| [c, c.questions_count]}
+  end
+
+  def uncompleted_polls_activerecord
+    completed = Poll
+      .joins(:questions)
+      .joins("INNER JOIN answer_choices ON answer_choices.question_id = questions.id")
+      .joins("LEFT OUTER JOIN ( #{Response.where("respondent_id = ?", self.id).to_sql} ) AS users_responses
+              ON users_responses.answer_choice_id = answer_choices.id")
+      .group("polls.id")
+      .having("COUNT(questions.id) > 1")
+      .select("polls.*, COUNT(DISTINCT(questions.id)) AS questions_count")
+
+    completed.map { |c| [c, c.questions_count]}
+  end
+
   def completed_polls
     Poll.find_by_sql(<<-SQL)
       SELECT
@@ -40,7 +66,7 @@ class User < ActiveRecord::Base
   end
 end
 
-# 
+#
 # execute (<<-SQL)
 #   SELECT
 #     polls.*, COUNT(DISTINCT(questions.id)) AS questions_count, COUNT(users_responses.id) AS responses_count
