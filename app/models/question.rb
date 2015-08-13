@@ -15,19 +15,26 @@ class Question < ActiveRecord::Base
     through: :answer_choices,
     source: :responses
 
-  def results
-    answer_choices
+  def result_joins
+    answer_choices_with_count = answer_choices
       .joins("LEFT OUTER JOIN responses ON responses.answer_choice_id = answer_choices.id")
       .group("answer_choices.id")
       .select("answer_choices.*, COUNT(responses.id) AS responses_count")
-    # answers = answer_choices.includes(:responses)
-    # answer_counts = {}
-    #
-    # answers.each do |answer|
-    #   answer_counts[answer] = answer.responses.length
-    # end
-    #
-    # answer_counts
+
+    answer_choices_with_count.map do |answer_choice|
+      [answer_choice, answer_choice.responses_count]
+    end
+  end
+
+  def result_includes
+    answers = answer_choices.includes(:responses)
+    answer_counts = {}
+
+    answers.each do |answer|
+      answer_counts[answer] = answer.responses.length
+    end
+
+    answer_counts
   end
 
 end
