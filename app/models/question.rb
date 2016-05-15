@@ -37,4 +37,20 @@ class Question < ActiveRecord::Base
     answer_counts
   end
 
+  def result_improved
+    AnswerChoices.find_by_sql(<<-SQL, self.id)
+      SELECT
+        answer_choices.*, COALESCE(COUNT(answer_choices.id), 0 ) AS choice_count
+      FROM
+        answer_choices
+      LEFT OUTER JOIN
+        responses ON answer_choices.id = responses.answer_choice_id
+      WHERE
+        answer_choice.question_id = (?)
+      GROUP BY
+        answer_choices.id
+
+    SQL
+  end
+
 end

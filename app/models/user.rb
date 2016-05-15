@@ -39,7 +39,9 @@ class User < ActiveRecord::Base
   def completed_polls
     Poll.find_by_sql(<<-SQL)
       SELECT
-        polls.*, COUNT(DISTINCT(questions.id)) AS questions_count, COUNT(users_responses.id) AS responses_count
+        polls.*,
+        COUNT(DISTINCT(questions.id)) AS questions_count,
+        COUNT(users_responses.id) AS responses_count
       FROM
         polls
       INNER JOIN

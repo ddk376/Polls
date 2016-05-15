@@ -1,0 +1,437 @@
+Active Relation
+
+Queries are lazy
+Querying methods like `group`, `having`, `includes`, `joins`, `select`, and `where`
+return an object of type `ActiveRecord::Relation`. The `Relation` object looks a lot
+like an `Array`; like an `Array` you can iterate through it or index into it.
+
+There is one major difference from an `Array`: the contents of `Relation` are not
+fetched until needed. This is called laziness.
+
+`
+users = User.where("likes_dogs = ?", true)
+
+#performs fetch here
+users.each { |user| puts "Hello #{user.name}"}
+# does not perform fetch; result is cached
+users.each{ |user| puts "Hello #{user.name}"}
+`
+
+The `Relation` is not evaluated (a database query is not fired) until the results
+are needed.
+
+Caching
+After the query is run, the results are cached by Relation; they are stored for later re-use.
+Subsequent calls to `each` will not fire a query; they will instead use the prior result.
+This is an advantage because we can re-use the result without constantly hitting the database
+over-and-over.
+
+`
+# Fires a query; `posts` relation stored in `user1`
+p user1.posts
+# => []
+p user1.posts.object_id
+# => 70232180387400
+
+Post.create!(
+  :user_id => user1.id, # this is the key line, because it ties the post to the user in the database
+  :title => "Title",
+  :body => "Body body body"
+)
+
+# Does not fire a query; uses cached `posts` relation, which itself
+# has cached the results
+p user1.posts
+# => []
+p user1.posts.object_id
+# => 70232180387400
+`
+
+Here `user1.posts` fires a query the first time. The second time, `user1.posts` uses
+the prior result. The cached result, however, is out of date; in between the first time we called
+`user1.posts` and the second time, we added a new `Post` for the user. This is not reflected in the
+`user1.posts` variable.
+
+This behavior can be surprising, but it actually is not a common issue. You can always force an
+association to be reloaded (ignoring any cached value) by calling `user1.posts(true)`. You may also
+call `user1.reload` to throw away all cached association relations. However, this is seldomly necessary.
+
+Lacking and stacking queries
+Laziness allows us to build complex queries
+`
+georges = User.where("first_name = ?", "George")
+georges.where_values
+# => ["first_name = 'George'"]
+george_harrisons = georges.where("last_name = ?", "Harrison")
+george_harrisons.where_values
+# => ["first_name = 'George'", "last_name = 'Harrison'"]
+
+p george_harrisons
+`
+Just like `where` has `where_values`, there are similar accessors for `include_values`, `join_values`, etc.
+You won't ever access the attributes directly, but you can see how `Relation` builds up the query by storing
+each of the conditions. When the `Relation` needs to be evaluated, ActiveRecord looks at each of these values
+to build the SQL to execute
+
+Forcing evaluation
+If you wish to force the evaluation of a `Relation`, you may call `load`. This will force evaluation if it hasn't
+been done already. Using `to_a` will return an actual array.
+Some other methods like `count` also force the evaluation of a query.
+
+
+The N+1 selects problem
+Let's write some code to get the number of comments per `Post` by a `User`:
+`
+class User
+  def n_plus_one_post_comment_counts
+    posts = self.posts
+    # SELECT * FROM posts WHERE posts.author_id = ?
+    #
+    # where `?` gets replaced with `user.id`
+
+    post_comment_counts = {}
+    post.each do |post|
+      # This query gets performed once for each post. Each db query has
+      # overhead, so this is very wasteful if ther are a lot of
+      # `Post`'s for the `User`
+      post_comment_counts[post] = post.comments.length
+      # SELECT * FROM comments WHERE comments.post_id = ?
+      # where `?` gets replaced with `post.id`
+  end
+  post_comment_counts
+end
+`
+1 query to the user's posts and N queries for one query per pos to find the comments for N+1 queries in total
+
+Solution to N+1 queries
+The solution to this problem is to fetch all the `Comment`s for all the `Post`s in one go, rather
+than fetch them one-by-one for each `Post`.
+Active Record lets you specify associations to prefetch. When you use these associations later,
+the data will already have been fetched and won't need to be queried for. To do this, use the `includes`
+method. If you use `includes` to prefetch data (`posts = user.posts.includes(:comments)`), a subsequent call
+to access the association (e.g.`posts[0].comments`) won't fire another DB query; it'll use the prefetched data
+
+We could rewrite `post_comment_counts` to use eager loading
+`
+# app/model/user.rb
+class User
+  def includes_post_comment_counts
+    # `includes` *prefetched the association* `comments`, so it doesn't
+    # need to be queried for later. `includes` does not change the
+    # type of the object returned (in this example, `Post's`); it only
+    # prefetched extra data.
+    posts = self.posts.includes(:comments)
+    # Makes two queries:
+    # SELECT * FROM posts WHERE post.author_id = ?
+    #
+    # where `?` is replaced with `user.id`
+    #
+    # ...and...
+    #
+    # SELECT * FROM comments WHERE comments.post_id IN ?
+    #
+    # where `?` is replaced with `self.posts.map(&:id)`, the `Array` of `Post` ids
+    post_comment_counts = {}
+    posts.each do |post|
+      # doesn't fire a query, since already prefetched the association
+      # way better than N+1
+      # NB: if we write `post.comments.count` ActiveRecord will try to
+      # be super-smart and run a `SELECT COUNT(*) FROM comments WHERE
+      # comments.post_id = ?` query. This is because ActiveRecord
+      # understands `#count`. But we already fetched the comments and
+      # don't want to go back to the DB, so we can avoid this behavior
+      # by calling `Array#length`.
+      post_comment_counts[post] = post.comments.length
+  end
+
+  post_comment_counts
+end
+`
+This will only perform 2 queries
+
+Complex includes
+`comments = user.comments.includes(:post, :parent_comment)`
+Then both the post and parent_comment associations are eagerly loaded. Neither comments[0].post nor comments[0].parent_comment will hit the DB; they've been prefetched.
+`posts = user.posts.includes(:comments => [:author, :parent_comment])
+first_post = posts[0]`
+
+This not only prefetches first_post.comments, it also will prefetch first_post.comments[0] and even first_post.comments[0].author and first_post.comments[0].parent_comment.
+
+Joining Tables
+To perform a SQL JOIN, use joins. Like includes, it takes a name of an association.
+
+joins by default performs an INNER JOIN, so they are frequently used to filter out records that don't have an associated record. For instance, let's filter Users who don't have Comments:
+`
+# app/models/user.rb
+class User
+  # ...
+
+  def self.users_with_comments
+    # `joins` can be surprising to SQL users. When we perform a SQL
+    # join, we expect to get "wider" rows (with the columns of both
+    # tables). But `joins` does not automatically return a wider row;
+    # User.joins(:comments) still just returns a User.
+    #
+    # In this sense, `joins` does the opposite of `includes`:
+    # `includes` fetches the entries and the associated entries
+    # both. `User.joins(:comments)` returns no `Comment` data, just
+    # the `User` columns. For this reason, `joins` is used less
+    # commonly than `includes`.
+
+    User.joins(:comments).uniq
+    # SELECT DISTINCT users.*
+    #   FROM users
+    #   JOIN comments
+    #     ON comments.author_id = users.id
+    #
+    # Note that only the user fields are selected!
+    #
+    # `User.joins(:comments)` returns an array of `User` objects; each
+    # `User` appears once for each `Comment` they've made. A `User`
+    # without a `Comment` will not appear (`joins` uses an INNER
+    # JOIN). If a user makes multiple comments, they appear multiple
+    # times in the result. For this reason, we slap on a `uniq` to
+    # only return a `User` at most once.
+  end
+end
+`
+
+Avoiding N+1 queries without loading lots of records
+
+We've seen how to eagerly load associated objects to dodge the N+1 queries problem. There is another problem we may run into: includes returns lots of data: it returns every Comment on every Post that the User has written. This may be many, many comments. In the case of counting comments per post, the Comments themselves are useless, we just want to count them.
+
+We're doing too much in Ruby: we want to push some of the counting work to SQL so that the database does it, and we receive just Post objects with associated comment counts. This is another major use of joins:
+
+# app/models/user.rb
+class User
+  # ...
+
+  def joins_post_comment_counts
+    # We use `includes` when we need to prefetch an association and
+    # use those associated records. If we only want to *aggregate* the
+    # associated records somehow, `includes` is wasteful, because all
+    # the associated records are pulled down into the app.
+    #
+    # For instance, if a `User` has posts with many, many comments, we
+    # would pull down every single comment. This may be more rows than
+    # our Rails app can handle. And we don't actually care about all
+    # the individual rows, we just want the count of how many there
+    # are.
+    #
+    # When we want to do an "aggregation" like summing the number of
+    # records (and don't care about the individual records), we want
+    # to use `joins`.
+
+    posts_with_counts = self
+      .posts
+      .select("posts.*, COUNT(*) AS comments_count") # more in a sec
+      .joins(:comments)
+      .group("posts.id") # "comments.post_id" would be equivalent
+    # in SQL:
+    #   SELECT posts.*, COUNT(*) AS comments_count
+    #     FROM posts
+    #    JOINS comments
+    #       ON comments.post_id = posts.id
+    #    WHERE posts.author_id = #{self.id}
+    # GROUP BY posts.id
+    #
+    # As we've seen before using `joins` does not change the type of
+    # object returned: this returns an `Array` of `Post` objects.
+    #
+    # But we do want some extra data about the `Post`: how many
+    # comments were left on it. We can use `select` to pick up some
+    # "bonus fields" and give us access to extra data.
+    #
+    # Here, I would like to have the database count the comments per
+    # post, and store this in a column named `comments_count`. The
+    # magic is that ActiveRecord will give me access to this column by
+    # dynamically adding a new method to the returned `Post` objects;
+    # I can call `#comments_count`, and it will access the value of
+    # this column:
+
+    posts_with_counts.map do |post|
+      # `#comments_count` will access the column we `select`ed in the
+      # query.
+      [post.title, post.comments_count]
+    end
+  end
+end
+OUTER JOINs
+
+The default for joins is to perform an INNER JOIN. In the previous example we will not return any posts with zero comments because there will be no comment row to join the post against.
+
+If we want to include posts with zero comments, we need to do an outer join. We can do this like so:
+
+posts_with_counts = self
+  .posts
+  .select("posts.*, COUNT(comments.id) AS comments_count") # more in a sec
+  .joins("LEFT OUTER JOIN comments ON posts.id = comments.post_id")
+  .group("posts.id") # "comments.post_id" would be equivalent
+This is a little more verbose because we don't get the benefit of piggybacking on the association name. We have to specify the primary and foreign key columns for the join.
+
+Specifying where conditions on joined tables
+
+You can specify conditions on the joined tables as usual, but you should qualify the column names:
+
+# fetch comments on `Posts` posted in the previous day
+start_time = (DateTime.now.midnight - 1.day)
+end_time = DateTime.now.midnight
+Comment.joins(:post).where(
+  'posts.created_at BETWEEN ? AND ?',
+  start_time,
+  end_time
+).uniq
+This is because of the potential that both tables have columns with the same name.
+
+Scopes
+It's common to write commonly used queries as a scope. A scope is just a fancy name for an ActiveRecord::Base class method that constructs all or part of a query and then returns the resulting Relation object.
+
+Use scopes to keep your query code DRY: move frequently-used queries into a scope. It will also make things much more readable by giving a convenient name of your choosing to the query.
+
+class Post < ActiveRecord::Base
+  def self.by_popularity
+    self
+      .select("posts.*, COUNT(*) AS comment_count")
+      .joins(:comments)
+      .group("posts.id")
+      .order("comment_count DESC")
+  end
+end
+We can now use Post.by_popularity:
+
+irb(main):001:0> posts = Post.by_popularity
+  Post Load (5.7ms)  SELECT posts.*, COUNT(*) AS comment_count FROM "posts" INNER JOIN "comments" ON "comments"."post_id" = "posts"."id" GROUP BY posts.id ORDER BY comment_count DESC
+=> #<ActiveRecord::Relation [#<Post id: 12>, #<Post id: 5>, ...]>
+irb(main):002:0> posts.first.comment_count
+=> 45
+Because it returns a Relation object and not just the results, we can continue to tack query methods onto it. This makes scopes super flexible. Suppose we only want the 5 most popular posts:
+
+irb(main):003:0> posts = Post.by_popularity.limit(5)
+  Post Load (1.4ms)  SELECT posts.*, COUNT(*) AS comment_count FROM "posts" INNER JOIN "comments" ON "comments"."post_id" = "posts"."id" GROUP BY posts.id ORDER BY comment_count DESC LIMIT 5
+=> #<ActiveRecord::Relation [#<Post id: 12>, #<Post id: 5>, ...]>
+irb(main):004:0> posts.count
+=> 5
+Another awesome thing about scopes is that you can use them with associations. Through a bit of Rails magic, we can call user.posts.by_popularity:
+
+irb(main):005:0> posts = User.first.posts.by_popularity
+  User Load (0.7ms)  SELECT "users".* FROM "users" ORDER BY "users"."id" ASC LIMIT 1
+  Post Load (28.7ms)  SELECT posts.*, COUNT(*) AS comment_count FROM "posts" INNER JOIN "comments" ON "comments"."post_id" = "posts"."id" WHERE "posts"."user_id" = $1 GROUP BY posts.id ORDER BY comment_count DESC  [["user_id", 1]]
+=> #<ActiveRecord::AssociationRelation #<Post id: 1>, #<Post id: 7>, ...]>
+irb(main):006:0> posts.first.comment_count
+=> 8
+Remember that User#posts returns a Relation object too. Relation objects know what kind of model objects they should contain. Because of this they will actually assume the class methods (including scopes) that are available on that model class. In this case, User#posts contains Post objects, so we can chain scopes like Post::by_popularity directly on the result of User#posts. Cool!
+
+One final note: You will often see a shorthand syntax for defining scopes using the scope method. Read more about this and other cool stuff like scope chaining in the docs.
+
+More on Querying
+Dynamic Finders
+
+We've seen how to use where to retrieve an array of AR objects matching some conditions. Sometimes, you want to find the single object that matches some criteria; you want to dispense with the array (which in this case will be either empty, or length 1). We use dynamic finders for this:
+
+Application.find_by_email_address("ned@appacademy.io")
+For any column X an AR model will respond to a message find_by_X. To do this, AR overrides method_missing?. You can even get crazy: find_by_X_and_Y_and_Z, passing three arguments.
+
+Typically you only use up to two search criteria; if you need more than two, just switch to where and then call first to get the first item of the results array.
+
+order, group, and having
+
+Ordering
+
+To retrieve records from the database in a specific order, you can use the order method.
+
+Client.order("orders_count ASC, created_at DESC").all
+Group, Having
+
+You can apply GROUP BY and HAVING clauses.
+
+UserPost
+  .joins(:likes)
+  .group("posts.id")
+  .having("COUNT(*) > 5")
+Aggregations
+
+You can perform all the typical aggregations:
+
+Client.count
+Orders.sum(:total_price)
+Orders.average(:total_price)
+Orders.minimum(:total_price)
+Orders.maximum(:total_price)
+Finding by SQL
+
+We've seen how to get ActiveRecord to do fairly advanced stuff for us.
+
+By the time I'd need these methods, I'd probably just use find_by_sql, honestly. ActiveRecord has its limits; it's great for reducing boilerplate SQL queries, but after a certain point you should drop down and just use SQL yourself. Be flexible; don't expect too much from ActiveRecord. Even if you have to drop to SQL for a few monster queries, ActiveRecord has saved you a lot of work on all the easy queries.
+
+The main problem with trying to take ActiveRecord too far is that it can become difficult to understand what kind of query it will generate or how it will do what you ask. The more you ask ActiveRecord to do, the more you have to trust that you express yourself properly, and the more you have to think about whether ActiveRecord will do the right thing. Sometimes simpler is better.
+
+If you'd like to use your own SQL to find records in a table you can use find_by_sql. The find_by_sql method will return an array of objects. For example you could run this query:
+
+Case.find_by_sql(<<-SQL)
+  SELECT
+    cases.*
+  FROM
+    cases
+  JOIN (
+    // the five lawyers with the most clients
+    SELECT
+      lawyers.*
+    FROM
+      lawyers
+    LEFT OUTER JOIN
+      clients ON lawyers.id = clients.lawyer_id
+    GROUP BY
+      lawyers.id
+    SORT BY
+      COUNT(clients.*)
+    LIMIT 5
+  ) ON ((cases.prosecutor_id = lawyer.id)
+         OR (cases.defender_id = lawyer.id))
+SQL
+Time to betray some ignorance: I don't know how I would do this with AR and not SQL (or if it's possible!). At the very least I don't know how I'd do it in one query.
+
+Even if I spent the time to torture myself and figure it out, I'd only be punishing the next person to read my code. Even if they understand my intent, it'd be a dog to figure out whether I'm constructing the query correctly in AR.
+
+NB:
+
+If you have a parameterized query that you need to pass values into, you need to pass all the arguments, including the query, in an array to find_by_sql. Consider this example from the find_by_sql API page:
+
+Post.find_by_sql(
+  [
+    "SELECT title FROM posts WHERE author = ? AND created > ?",
+    author_id,
+    start_date
+  ]
+)
+Notice that the query and the values to insert are all in one array argument.
+
+NULL and Ternary Logic in SQL
+
+SQL uses ternary logic. This means that a conditional statement can evaluate to TRUE, FALSE or NULL. Whaaaa? :open_mouth: That is strange.
+
+How in the world do you get a conditional statement to return NULL? You compare something to NULL, that's how!
+
+Incidentally, NULL compared to anything (including NULL) is NULL, and NULL is falsy, so WHERE clauses that compare to NULL will always return nothing. This is why you see IS NULL and IS NOT NULL in SQL queries instead of = NULL or != NULL.
+
+The Interpolation Problem
+
+Consider now what happens when you try to interpolate something that might be NULL into a where clause. A classic case of this would be excluding an individual from a set.
+
+User.where('id != ?', user.id)
+This works fine so long as the user is saved to the DB and has an id. If they're not saved though, this will evaluate to id != NULL and return no results. At the same time, we can't say id IS NOT ? because that will fail if there is an id.
+
+We're darned if we do and darned if we don't!
+
+Rails Magic
+
+You might be wondering why we've never come across this problem before. There's a reason for that, and it's name is magic. Whenever we've used nil inside a where before this, Rails just knew how to deal with it:
+
+User.where(email: nil)
+This works just fine because Rails detects that email is being compared to NULL and sets up the correct verbage for SQL. We're having trouble now because we need to negate the comparison so we're using a SQL fragment. This locks Rails into our pre-set SQL so it can't work its magic.
+
+So how do we make this work? How do we bring back the magic?
+
+We need the magic of where, but the power of !. We need where.not!
+
+User.where.not(id: user.id)
+Now Rails is free to do its IS NOT magic without our SQL fragment in the way, and our query works as intended.
