@@ -37,7 +37,7 @@ class User < ActiveRecord::Base
   end
 
   def completed_polls
-    Poll.find_by_sql(<<-SQL)
+    Poll.find_by_sql(<<-SQL, self.id)
       SELECT
         polls.*,
         COUNT(DISTINCT(questions.id)) AS questions_count,
