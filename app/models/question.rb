@@ -49,7 +49,6 @@ class Question < ActiveRecord::Base
         answer_choice.question_id = (?)
       GROUP BY
         answer_choices.id
-
     SQL
   end
 
